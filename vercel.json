@@ -1,0 +1,16 @@
+{
+  "framework": "nextjs",
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "Cross-Origin-Opener-Policy", "value": "same-origin" },
+        { "key": "Cross-Origin-Embedder-Policy", "value": "require-corp" }
+      ]
+    }
+  ],
+  "env": {
+    "NEXT_PUBLIC_HF_DATASET_URL": "@hf_dataset_url",
+    "PYTHON_MODEL_URL": "@python_model_url"
+  }
+}
