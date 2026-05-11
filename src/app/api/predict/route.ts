@@ -1,50 +1,73 @@
 /**
- * /api/predict — ML prediction endpoint
+ * /api/chat — Server-side Groq AI proxy
  *
- * In production, this route calls the Python sklearn model service.
- * The Python service (api/model_server.py) should be deployed separately
- * (e.g. as a Vercel Serverless Function via Python runtime, or a
- *  separate FastAPI service on Railway/Render).
+ * The Groq API key lives ONLY here, in a server-side route.
+ * The browser calls /api/chat (our own server), never Groq directly.
+ * This means the key is never sent to or visible in the browser.
  *
- * For Vercel deployment, set PYTHON_MODEL_URL env var to your Python service.
- * Falls back to the JS approximation model if the Python service is unavailable.
+ * Environment variable required (server-side only, no NEXT_PUBLIC_ prefix):
+ *   GROQ_API_KEY=gsk_...
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { predictDelay } from "@/lib/mlModel";
-import type { JourneyInput } from "@/lib/mlModel";
 
-const PYTHON_MODEL_URL = process.env.PYTHON_MODEL_URL;
+const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
+const GROQ_MODEL = "llama-3.3-70b-versatile";
 
 export async function POST(req: NextRequest) {
+  const groqApiKey = process.env.GROQ_API_KEY;
+
+  if (!groqApiKey) {
+    return NextResponse.json(
+      { error: "AI service is not configured." },
+      { status: 503 }
+    );
+  }
+
   try {
-    const body: JourneyInput = await req.json();
+    const { messages, systemPrompt } = await req.json();
 
-    // If Python model service is configured, call it
-    if (PYTHON_MODEL_URL) {
-      try {
-        const pythonRes = await fetch(`${PYTHON_MODEL_URL}/predict`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(5000),
-        });
-
-        if (pythonRes.ok) {
-          const prediction = await pythonRes.json();
-          return NextResponse.json(prediction);
-        }
-      } catch (err) {
-        console.warn("[predict] Python model unavailable, using JS fallback:", err);
-      }
+    if (!messages || !Array.isArray(messages)) {
+      return NextResponse.json(
+        { error: "Invalid request body." },
+        { status: 400 }
+      );
     }
 
-    // JS approximation fallback
-    const prediction = predictDelay(body);
-    return NextResponse.json({ ...prediction, source: "js-approximation" });
+    const groqRes = await fetch(GROQ_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${groqApiKey}`,
+      },
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        max_tokens: 300,
+        temperature: 0.7,
+        messages: [
+          { role: "system", content: systemPrompt ?? "" },
+          ...messages,
+        ],
+      }),
+    });
+
+    if (!groqRes.ok) {
+      const errorText = await groqRes.text();
+      console.error("[chat] Groq API error:", groqRes.status, errorText);
+      return NextResponse.json(
+        { error: "AI service returned an error." },
+        { status: 502 }
+      );
+    }
+
+    const data = await groqRes.json();
+    const reply = data.choices?.[0]?.message?.content ?? "Sorry, I couldn't get a response.";
+
+    return NextResponse.json({ reply });
   } catch (err) {
+    console.error("[chat] Unexpected error:", err);
     return NextResponse.json(
-      { error: "Prediction failed", details: String(err) },
+      { error: "An unexpected error occurred." },
       { status: 500 }
     );
   }

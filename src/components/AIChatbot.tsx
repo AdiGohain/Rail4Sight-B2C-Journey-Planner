@@ -79,13 +79,17 @@ export default function AIChatbot({ journeys, searchParams }: Props) {
     setLoading(true);
 
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      /**
+       * Calls our own Next.js server-side route at /api/chat.
+       * The Groq API key lives only in that server route (GROQ_API_KEY).
+       * It is never included in browser code or network requests the
+       * user can inspect — the browser only ever talks to our own server.
+       */
+      const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 300,
-          system: buildSystemPrompt(journeys, searchParams),
+          systemPrompt: buildSystemPrompt(journeys, searchParams),
           messages: newMessages.map((m) => ({
             role: m.role,
             content: m.content,
@@ -93,9 +97,12 @@ export default function AIChatbot({ journeys, searchParams }: Props) {
         }),
       });
 
+      if (!res.ok) {
+        throw new Error(`Server error: ${res.status}`);
+      }
+
       const data = await res.json();
-      const reply =
-        data.content?.[0]?.text ?? "Sorry, I couldn't get a response.";
+      const reply = data.reply ?? "Sorry, I couldn't get a response.";
 
       setMessages((prev) => [
         ...prev,
@@ -131,7 +138,10 @@ export default function AIChatbot({ journeys, searchParams }: Props) {
 
       {/* Chat window */}
       {open && (
-        <div className="fixed bottom-6 right-6 w-80 bg-white rounded-2xl shadow-xl border border-gray-200 flex flex-col overflow-hidden z-50" style={{ height: "420px" }}>
+        <div
+          className="fixed bottom-6 right-6 w-80 bg-white rounded-2xl shadow-xl border border-gray-200 flex flex-col overflow-hidden z-50"
+          style={{ height: "420px" }}
+        >
           {/* Header */}
           <div className="flex items-center justify-between px-4 py-3 bg-[#185FA5] text-white">
             <div className="flex items-center gap-2">
