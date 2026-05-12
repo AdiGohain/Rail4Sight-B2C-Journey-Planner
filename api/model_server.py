@@ -1,21 +1,23 @@
 """
 Rail4Sight Model Server — FastAPI
 ==================================
-Serves the trained sklearn models as a REST API.
+Serves the trained sklearn models via REST API.
+Feature engineering mirrors train_model.py / completemodel.py exactly.
 
-Deploy options:
-  - Vercel Python Serverless Functions
-  - Railway.app
-  - Render.com
-  - Any Docker host
+Deploy on Coolify (recommended — free, self-hosted):
+  See COOLIFY_DEPLOY.md for full instructions.
 
 Run locally:
-  pip install fastapi uvicorn scikit-learn joblib pandas numpy
-  uvicorn model_server:app --reload --port 8000
+  pip install -r requirements.txt
+  uvicorn api.model_server:app --reload --port 8000
+
+Health check: GET /health
+Predict:      POST /predict
 """
 
 import json
 import math
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -26,22 +28,27 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# ──────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
 # Load models
-# ──────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
 MODEL_DIR = Path("models")
 
 try:
-    clf = joblib.load(MODEL_DIR / "delay_classifier.joblib")
-    reg = joblib.load(MODEL_DIR / "delay_regressor.joblib")
+    clf  = joblib.load(MODEL_DIR / "delay_classifier.joblib")
+    reg  = joblib.load(MODEL_DIR / "delay_regressor.joblib")
     meta = json.loads((MODEL_DIR / "feature_meta.json").read_text())
     MODELS_LOADED = True
     print("✓ Models loaded successfully")
-except FileNotFoundError:
+    print(f"  Classifier ROC-AUC : {meta.get('classifier_roc_auc')}")
+    print(f"  Regressor MAE      : {meta.get('regressor_mae')} min")
+except FileNotFoundError as e:
     MODELS_LOADED = False
-    print("⚠ Models not found — run train_model.py first")
+    print(f"⚠ Models not found ({e}) — run: python api/train_model.py")
 
-app = FastAPI(title="Rail4Sight ML API", version="1.0.0")
+# ──────────────────────────────────────────────────────────────
+# App
+# ──────────────────────────────────────────────────────────────
+app = FastAPI(title="Rail4Sight ML API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -50,69 +57,87 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# ──────────────────────────────────────────────
-# Schema
-# ──────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
+# Request / Response schemas
+# ──────────────────────────────────────────────────────────────
 class PredictRequest(BaseModel):
-    departureStation: str
-    arrivalDestination: str
-    ticketType: Literal["Advance", "Off-Peak", "Anytime"]
-    price: float
-    departureTime: str        # "HH:MM"
-    journeyDate: str          # "YYYY-MM-DD"
-    durationMinutes: int
+    departureStation:    str
+    arrivalDestination:  str
+    ticketType:          Literal["Advance", "Off-Peak", "Anytime"]
+    price:               float
+    departureTime:       str   # "HH:MM"
+    journeyDate:         str   # "YYYY-MM-DD"
+    durationMinutes:     int   # scheduled journey duration in minutes
 
 
 class PredictResponse(BaseModel):
-    delayProbability: float
-    riskLabel: Literal["low", "moderate", "high"]
+    delayProbability:      float
+    riskLabel:             Literal["low", "moderate", "high"]
     predictedDelayMinutes: int
-    expectedDelayMinutes: int
-    confidence: Literal["high", "medium", "low"]
-    source: str = "sklearn-gbm"
+    expectedDelayMinutes:  int
+    confidence:            Literal["high", "medium", "low"]
+    source:                str = "sklearn-gbm"
 
 
-# ──────────────────────────────────────────────
-# Feature engineering (mirrors train_model.py)
-# ──────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
+# Feature engineering
+# Must match train_model.py / completemodel.py exactly
+# ──────────────────────────────────────────────────────────────
+def cyclic(value: float, period: float):
+    return (
+        math.sin(2 * math.pi * value / period),
+        math.cos(2 * math.pi * value / period),
+    )
+
 def build_features(req: PredictRequest) -> pd.DataFrame:
-    h, m = map(int, req.departureTime.split(":"))
-    dep_hour = h + m / 60
+    # Parse departure time → hour-of-day cyclical features
+    dep = datetime.strptime(req.departureTime, "%H:%M")
+    dep_hour_sin, dep_hour_cos = cyclic(dep.hour, 24)
 
+    # Parse journey date → day-of-week and month cyclical features
     journey_date = pd.to_datetime(req.journeyDate)
-    dow = journey_date.dayofweek
+    dow   = journey_date.dayofweek   # 0 = Monday
     month = journey_date.month
 
+    dow_sin,   dow_cos   = cyclic(dow,   7)
+    month_sin, month_cos = cyclic(month, 12)
+
     row = {
-        "Departure Station": req.departureStation,
+        # Categorical
+        "Departure Station":   req.departureStation,
         "Arrival Destination": req.arrivalDestination,
-        "Ticket Type": req.ticketType,
-        "Price": req.price,
-        "duration_minutes": req.durationMinutes,
-        "sin_hour": math.sin(2 * math.pi * dep_hour / 24),
-        "cos_hour": math.cos(2 * math.pi * dep_hour / 24),
-        "sin_dow": math.sin(2 * math.pi * dow / 7),
-        "cos_dow": math.cos(2 * math.pi * dow / 7),
-        "sin_month": math.sin(2 * math.pi * month / 12),
-        "cos_month": math.cos(2 * math.pi * month / 12),
+        "Ticket Type":         req.ticketType,
+        # Numeric — column names match completemodel.py
+        "Price":               req.price,
+        "journey_duration_min": req.durationMinutes,
+        "dep_hour_sin":        dep_hour_sin,
+        "dep_hour_cos":        dep_hour_cos,
+        "dow_sin":             dow_sin,
+        "dow_cos":             dow_cos,
+        "month_sin":           month_sin,
+        "month_cos":           month_cos,
     }
 
     return pd.DataFrame([row])
 
 
-# ──────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
 # Endpoints
-# ──────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "models_loaded": MODELS_LOADED}
+    return {
+        "status":        "ok",
+        "models_loaded": MODELS_LOADED,
+        "classifier_roc_auc": meta.get("classifier_roc_auc") if MODELS_LOADED else None,
+        "regressor_mae":      meta.get("regressor_mae")      if MODELS_LOADED else None,
+    }
 
 
 @app.get("/meta")
 def model_meta():
     if not MODELS_LOADED:
-        raise HTTPException(503, "Models not loaded")
+        raise HTTPException(503, "Models not loaded — run train_model.py first")
     return meta
 
 
@@ -123,11 +148,10 @@ def predict(req: PredictRequest):
 
     X = build_features(req)
 
-    # Stage 1: classification
+    # ── Stage 1: classify ──────────────────────────────────────
     delay_prob = float(clf.predict_proba(X)[0, 1])
-    delay_prob = min(max(delay_prob, 0.01), 0.97)
+    delay_prob = min(max(delay_prob, 0.01), 0.97)   # clamp to sane range
 
-    # Risk label
     if delay_prob >= 0.55:
         risk = "high"
     elif delay_prob >= 0.30:
@@ -135,18 +159,19 @@ def predict(req: PredictRequest):
     else:
         risk = "low"
 
-    # Stage 2: regression (only for moderate/high risk)
+    # ── Stage 2: regress (moderate/high risk only) ────────────
     if risk != "low":
-        predicted_minutes = int(round(float(reg.predict(X)[0])))
+        predicted_minutes = int(round(float(np.clip(reg.predict(X)[0], 0, None))))
         predicted_minutes = max(5, min(120, predicted_minutes))
     else:
         predicted_minutes = int(round(delay_prob * 15))
 
     expected_minutes = int(round(delay_prob * predicted_minutes))
 
-    # Confidence based on whether station is in training data
+    # ── Confidence ────────────────────────────────────────────
     known_stations = set(meta.get("stations", []))
-    if req.departureStation in known_stations and req.arrivalDestination in known_stations:
+    if (req.departureStation  in known_stations and
+            req.arrivalDestination in known_stations):
         confidence = "high"
     elif delay_prob > 0.3:
         confidence = "medium"
@@ -154,9 +179,9 @@ def predict(req: PredictRequest):
         confidence = "low"
 
     return PredictResponse(
-        delayProbability=round(delay_prob, 4),
-        riskLabel=risk,
-        predictedDelayMinutes=predicted_minutes,
-        expectedDelayMinutes=expected_minutes,
-        confidence=confidence,
+        delayProbability=      round(delay_prob, 4),
+        riskLabel=             risk,
+        predictedDelayMinutes= predicted_minutes,
+        expectedDelayMinutes=  expected_minutes,
+        confidence=            confidence,
     )

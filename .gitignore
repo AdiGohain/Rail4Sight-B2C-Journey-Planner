@@ -54,7 +54,7 @@ build/
 # =========================
 # ML / Data files
 # =========================
-models/*.joblib
+# models/*.joblib
 models/*.pkl
 railway.parquet
 *.h5
